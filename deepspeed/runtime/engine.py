@@ -469,13 +469,6 @@ class DeepSpeedEngine(Module):
             return getattr(self, name)
         elif name in dir(_module):
             return getattr(_module, name)
-        elif isinstance(_module, CompiledModuleWrapper):
-            try:
-                return getattr(_module, name)
-            except AttributeError:
-                raise AttributeError(
-                    f"None of {type(self).__name__}, CompiledModuleWrapper, or the wrapped model has the attribute '{name}'"
-                )
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
@@ -1270,7 +1263,7 @@ class DeepSpeedEngine(Module):
         else:
             self.optimizer = basic_optimizer
 
-        log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer_name()), ranks=[0])
+        log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
 
         self.compression_scheduler = self._configure_compression_scheduler()
         self.quantizer = self._configure_quantization()
@@ -2542,7 +2535,7 @@ class DeepSpeedEngine(Module):
         return tensor_list
 
     def module_state_dict(self, destination=None, prefix="", keep_vars=False, exclude_frozen_parameters=False):
-        sd = self.module.state_dict(destination, prefix, keep_vars)
+        sd = self.module.state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
 
         # Remove frozen parameter weights from state_dict if specified
         if exclude_frozen_parameters:
@@ -3228,9 +3221,12 @@ class DeepSpeedEngine(Module):
 
         # Load flow uses below saved file for model parameters, RNG and more
         if groups._get_data_parallel_rank() == 0:
-            # get non-moe parameters
+            # Get non-moe parameters
+            # Classes DeepSpeedEngine and PipelineEngine have different behavior for method module_state_dict.
+            # DeepSpeedEngine returns the state dict, where PipelineEngine saves the state dict and returns None.
+            # We need to get the state dict, therefore, call to DeepSpeedEngine (base class for PipelineEngine)
             model_state_dict = self._get_non_moe_state_dict(
-                self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters))
+                DeepSpeedEngine.module_state_dict(self, exclude_frozen_parameters=exclude_frozen_parameters))
 
             # TODO: update num experts info,.. in checkpoint
             state = {

@@ -13,11 +13,11 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
-                                     align_dense_tensors, all_gather_dp_groups, bwc_tensor_model_parallel_rank,
-                                     is_model_parallel_parameter, see_memory_usage, graph_process,
-                                     get_norm_with_moe_layers)
+                                     align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
+                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
+from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
@@ -341,7 +341,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
         # clear gradients
         if clear_lp_grads:
-            lp.grad._zero()
+            lp.grad.zero_()
 
     @torch.no_grad()
     def _update_hp_grads_func(self, clear_lp_grads=False):
@@ -441,11 +441,20 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_has_gradients[i] = [False] * len(group)
 
     def clear_lp_grads(self):
+
+        # using zero_() fixed memory address for graph replay
+        set_to_none = False if self.graph_harvesting else True
+        zero_grads_list = []
         for group in self.bf16_groups:
             for param in group:
-                if param.grad is not None:
-                    # Using zero_() fixed memory address for graph replay
-                    param.grad.zero_()
+                if set_to_none:
+                    param.grad = None
+                elif param.grad is not None:
+                    if param.grad.grad_fn is not None:
+                        param.grad.detach_()
+                    zero_grads_list.append(param.grad)
+        if not set_to_none and len(zero_grads_list) > 0:
+            torch._foreach_zero_(zero_grads_list)
 
     def state_dict(self):
         state_dict = {}
